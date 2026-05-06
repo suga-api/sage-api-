@@ -1,17 +1,12 @@
-import re
+import pdfplumber
 import requests
 import json
 import os
 
-# ------------------------------------------------------------
-# CONFIGURATION – CHANGE THESE TWO LINES
-# ------------------------------------------------------------
-API_BASE = "https://your-api-name.onrender.com"   # Your Render URL
-PDF_FOLDER = "pdfs"                               # Folder containing your PDF files
-# ------------------------------------------------------------
+API_BASE = "https://your-api-name.onrender.com"   # Replace with your actual Render URL
+PDF_FOLDER = "pdfs"   # folder where you put your PDF files
 
 def extract_text_from_pdf(pdf_path):
-    """Extract all text from a PDF file."""
     full_text = ""
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
@@ -24,7 +19,7 @@ def process_pdf(pdf_path, topic="civil_engineering"):
     print(f"Processing: {pdf_path}")
     raw_text = extract_text_from_pdf(pdf_path)
     
-    # Step 1: Parse the raw text using your API
+    # Call your API's /sage/parse-pdf endpoint
     parse_resp = requests.post(f"{API_BASE}/sage/parse-pdf", json={
         "raw_text": raw_text,
         "topic": topic
@@ -39,7 +34,7 @@ def process_pdf(pdf_path, topic="civil_engineering"):
         print("  No questions found in this PDF.")
         return 0
     
-    # Step 2: Insert questions into database
+    # Insert questions into your database
     insert_payload = {"data": questions}
     insert_resp = requests.post(f"{API_BASE}/sage/insert", json=insert_payload)
     if insert_resp.status_code == 200:
@@ -69,36 +64,6 @@ def main():
         total_questions += q_count
     
     print(f"\n✅ Done! Total questions inserted: {total_questions}")
-class PDFTextReq(BaseModel):
-    raw_text: str
-    topic: str = "general"
 
-@app.post("/sage/parse-pdf")
-def parse_pdf(req: PDFTextReq):
-    """
-    Extract MCQs from raw PDF text that follows format:
-    Q{number}. ... A) ... B) ... C) ... D) ... Correct Answer: X
-    """
-    pattern = r"(Q\d+\..*?Correct Answer:\s*([A-D]))"
-    matches = re.findall(pattern, req.raw_text, re.DOTALL)
-    parsed = []
-    for block, ans in matches:
-        # Extract question text (everything before first A) )
-        q_text = re.split(r"A\)", block)[0]
-        q_text = re.sub(r"Q\d+\.", "", q_text).strip()
-        # Extract options
-        options = re.findall(r"([A-D])\)\s*(.*?)(?=[A-D]\)|$)", block, re.DOTALL)
-        opt_dict = {k: v.strip() for k, v in options[:4] if k in "ABCD"}
-        if not opt_dict:
-            continue
-        parsed.append({
-            "topic": req.topic,
-            "difficulty": "medium",   # default; you can adjust later
-            "text": q_text,
-            "options": opt_dict,
-            "correct": ans,
-            "source": "pyq_pdf"
-        })
-    return {"parsed_questions": parsed}
 if __name__ == "__main__":
     main()

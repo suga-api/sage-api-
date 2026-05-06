@@ -1,4 +1,4 @@
-import re
+import pdfplumber
 import requests
 import json
 import os
@@ -69,36 +69,6 @@ def main():
         total_questions += q_count
     
     print(f"\n✅ Done! Total questions inserted: {total_questions}")
-class PDFTextReq(BaseModel):
-    raw_text: str
-    topic: str = "general"
 
-@app.post("/sage/parse-pdf")
-def parse_pdf(req: PDFTextReq):
-    """
-    Extract MCQs from raw PDF text that follows format:
-    Q{number}. ... A) ... B) ... C) ... D) ... Correct Answer: X
-    """
-    pattern = r"(Q\d+\..*?Correct Answer:\s*([A-D]))"
-    matches = re.findall(pattern, req.raw_text, re.DOTALL)
-    parsed = []
-    for block, ans in matches:
-        # Extract question text (everything before first A) )
-        q_text = re.split(r"A\)", block)[0]
-        q_text = re.sub(r"Q\d+\.", "", q_text).strip()
-        # Extract options
-        options = re.findall(r"([A-D])\)\s*(.*?)(?=[A-D]\)|$)", block, re.DOTALL)
-        opt_dict = {k: v.strip() for k, v in options[:4] if k in "ABCD"}
-        if not opt_dict:
-            continue
-        parsed.append({
-            "topic": req.topic,
-            "difficulty": "medium",   # default; you can adjust later
-            "text": q_text,
-            "options": opt_dict,
-            "correct": ans,
-            "source": "pyq_pdf"
-        })
-    return {"parsed_questions": parsed}
 if __name__ == "__main__":
     main()
