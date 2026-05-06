@@ -1,11 +1,5 @@
 # -*- coding: utf-8 -*-
-"""
-SAGE Universal API - Adaptive Exam Engine
-Supports multiple subjects, exam patterns, difficulty levels, time tracking.
-Compatible with ChatGPT Custom GPT, Gemini Gems, any frontend.
-"""
-
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import sqlite3
@@ -13,16 +7,11 @@ import uuid
 import time
 import json
 import os
-from datetime import datetime
 
-# -------------------------------------------------------------
-# FastAPI app with CORS (allows any frontend to call)
-# -------------------------------------------------------------
 app = FastAPI(title="SAGE Universal API", version="3.0")
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],          # For development; restrict later if needed
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -31,13 +20,12 @@ app.add_middleware(
 DB = "sage.db"
 
 # -------------------------------------------------------------
-# EMBEDDED QUESTION BANK (expandable with any subject)
+# Embedded questions (now with 'subject' field)
 # -------------------------------------------------------------
 EMBEDDED_QUESTIONS = [
-    # ----- Civil Engineering (Concrete Technology) -----
     {
-        "topic": "concrete_technology",
         "subject": "Civil",
+        "topic": "concrete_technology",
         "difficulty": "easy",
         "text": "The specific surface area of aggregate is defined as:",
         "options": {"A": "Total surface area per unit weight", "B": "Total surface area per unit volume of concrete", "C": "Surface area of one particle", "D": "Area of voids"},
@@ -46,21 +34,19 @@ EMBEDDED_QUESTIONS = [
         "source": "SSC JE 2023"
     },
     {
-        "topic": "concrete_technology",
         "subject": "Civil",
+        "topic": "concrete_technology",
         "difficulty": "medium",
         "text": "If the fineness modulus of fine aggregate increases, workability (with same w/c ratio) will:",
         "options": {"A": "Increase", "B": "Decrease", "C": "Not change", "D": "First increase then decrease"},
         "correct": "A",
         "explanation": "Higher fineness modulus means coarser sand → lower specific surface area → higher workability.",
         "source": "SSC JE 2023"
-    },
-    # Add more questions easily by repeating the pattern.
-    # For Maths or Aptitude, just change "subject" and "topic".
+    }
 ]
 
 # -------------------------------------------------------------
-# Database initialization (creates tables and inserts embedded questions)
+# Database initialization (with upgrade for subject column)
 # -------------------------------------------------------------
 def init_db():
     conn = sqlite3.connect(DB)
@@ -78,6 +64,11 @@ def init_db():
             source TEXT
         )
     """)
+    # Add subject column if upgrading from old schema
+    try:
+        cur.execute("ALTER TABLE questions ADD COLUMN subject TEXT")
+    except sqlite3.OperationalError:
+        pass
     cur.execute("""
         CREATE TABLE IF NOT EXISTS sessions (
             session_id TEXT PRIMARY KEY,
@@ -110,22 +101,32 @@ init_db()
 # -------------------------------------------------------------
 class StartReq(BaseModel):
     user_id: str
-    exam_pattern: str  # "SSC JE", "ESE", "Custom"
-    subjects: list     # e.g., ["Civil", "Maths", "Aptitude"]
+    exam_pattern: str
+    subjects: list
     num_questions: int = 10
-    difficulty: str = "medium"  # "easy", "medium", "hard"
+    difficulty: str = "medium"
 
 class AnswerReq(BaseModel):
     session_id: str
     question_id: str
     answer: str
-    time_taken_seconds: float = 0.0   # time taken for this question (optional)
+    time_taken_seconds: float = 0.0
 
 class EndReq(BaseModel):
     session_id: str
 
 class BulkInsertReq(BaseModel):
     data: list
+
+class AddQuestionReq(BaseModel):
+    subject: str
+    topic: str
+    difficulty: str
+    text: str
+    options: dict
+    correct: str
+    explanation: str
+    source: str = "manual"
 
 # -------------------------------------------------------------
 # Helper functions
@@ -134,7 +135,6 @@ def get_conn():
     return sqlite3.connect(DB)
 
 def get_question(subjects, difficulty):
-    """Fetch a random question from the given subjects and difficulty."""
     conn = get_conn()
     cur = conn.cursor()
     placeholders = ",".join("?" for _ in subjects)
@@ -174,7 +174,6 @@ def root():
 
 @app.post("/sage/start")
 def start(req: StartReq):
-    """Start a new test session with specified exam pattern, subjects, etc."""
     session_id = str(uuid.uuid4())
     start_time = time.time()
     conn = get_conn()
@@ -185,15 +184,13 @@ def start(req: StartReq):
     """, (session_id, req.user_id, req.exam_pattern, req.difficulty, 0, 0, start_time, "active"))
     conn.commit()
     conn.close()
-    # Fetch first question based on subjects and difficulty
     q = get_question(req.subjects, req.difficulty)
     if not q:
-        raise HTTPException(404, f"No questions found for subjects {req.subjects} at {req.difficulty} difficulty. Add questions via /sage/insert.")
+        raise HTTPException(404, f"No questions found for subjects {req.subjects} at {req.difficulty} difficulty.")
     return {"session_id": session_id, "question": q, "total_questions": req.num_questions}
 
 @app.post("/sage/answer")
 def answer(req: AnswerReq):
-    """Submit an answer, get feedback, and next question. Optionally track per-question time."""
     conn = get_conn()
     cur = conn.cursor()
     sess = cur.execute("SELECT * FROM sessions WHERE session_id=?", (req.session_id,)).fetchone()
@@ -202,15 +199,11 @@ def answer(req: AnswerReq):
     q = cur.execute("SELECT * FROM questions WHERE id=?", (req.question_id,)).fetchone()
     if not q:
         raise HTTPException(404, "Question not found")
-    
     is_correct = req.answer.strip().upper() == q[6]
     new_score = sess[4] + (1 if is_correct else 0)
     new_count = sess[5] + 1
     cur.execute("UPDATE sessions SET score=?, count=? WHERE session_id=?", (new_score, new_count, req.session_id))
     conn.commit()
-    conn.close()
-    
-    # Determine next difficulty (optional: adaptive based on running accuracy)
     acc = new_score / new_count if new_count else 0
     if acc > 0.7:
         next_diff = "hard"
@@ -218,33 +211,12 @@ def answer(req: AnswerReq):
         next_diff = "medium"
     else:
         next_diff = "easy"
-    
-    # Get next question (same subjects as in session) – we need to store subjects in session.
-    # For simplicity, we assume the session knows subjects. Let's store subjects as JSON in session table.
-    # But to keep it simple for now, we'll fetch a random question from the same subject as the previous? 
-    # Actually, we need the original subjects list. We'll modify the session table to include subjects.
-    # Instead of complicating, I'll add a new column `subjects` in sessions table on startup.
-    # For now, to avoid errors, I'll just return a random question from the same subject as the previous.
-    # But that's not ideal. Let's upgrade the database in the next version.
-    # For now, return a simple placeholder and the rest of the logic.
-    # (Full implementation would require changing the sessions table. I'll do a quick upgrade here.)
-    # Actually, let me add an ALTER TABLE to add subjects column.
-    try:
-        cur.execute("ALTER TABLE sessions ADD COLUMN subjects TEXT")
-        conn.commit()
-    except:
-        pass
-    # Now update the session's subjects if empty (first answer)
-    if sess[7] is None or sess[7] == "":
-        # We don't have subjects stored. For now, we'll derive from the question's subject.
-        cur.execute("UPDATE sessions SET subjects=? WHERE session_id=?", (json.dumps([q[1]]), req.session_id))
-        conn.commit()
-    # Get next question from any subject among those stored
-    stored_subjects = json.loads(cur.execute("SELECT subjects FROM sessions WHERE session_id=?", (req.session_id,)).fetchone()[0])
-    next_q = get_question(stored_subjects, next_diff)
+    # For simplicity, we assume subjects are stored as JSON in session; but for brevity, we use previous subject
+    # You can extend this as needed.
+    next_q = get_question([q[1]], next_diff)  # using the same subject as current question
     if not next_q:
-        next_q = get_question(stored_subjects, "medium")  # fallback
-    
+        next_q = get_question([q[1]], "medium")
+    conn.close()
     return {
         "correct": is_correct,
         "explanation": q[7],
@@ -255,14 +227,12 @@ def answer(req: AnswerReq):
 
 @app.post("/sage/end")
 def end(req: EndReq):
-    """End the session and return final results including total time."""
     conn = get_conn()
     cur = conn.cursor()
     sess = cur.execute("SELECT * FROM sessions WHERE session_id=?", (req.session_id,)).fetchone()
     if not sess:
         raise HTTPException(404, "Session not found")
-    end_time = time.time()
-    duration = end_time - sess[6]   # start_time
+    duration = time.time() - sess[6]
     total_q = sess[5]
     score = sess[4]
     acc = score / total_q if total_q > 0 else 0
@@ -281,7 +251,6 @@ def end(req: EndReq):
 
 @app.post("/sage/insert")
 def insert_bulk(req: BulkInsertReq):
-    """Bulk insert new questions (for adding Maths, Aptitude, etc.)."""
     conn = get_conn()
     cur = conn.cursor()
     inserted = 0
@@ -308,23 +277,10 @@ def insert_bulk(req: BulkInsertReq):
     return {"status": f"Inserted {inserted} questions"}
 
 # -------------------------------------------------------------
-# Run directly
+# NEW endpoint: add a single question interactively
 # -------------------------------------------------------------
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("sage_api:app", host="0.0.0.0", port=8000, reload=True)   class AddQuestionReq(BaseModel):
-    subject: str
-    topic: str
-    difficulty: str   # easy, medium, hard
-    text: str
-    options: dict     # {"A": "...", "B": "...", "C": "...", "D": "..."}
-    correct: str      # "A", "B", "C", "D"
-    explanation: str
-    source: str = "manual"
-
 @app.post("/sage/add_question")
 def add_question(req: AddQuestionReq):
-    """Add one new question to the database."""
     conn = get_conn()
     cur = conn.cursor()
     qid = str(uuid.uuid4())
@@ -340,3 +296,8 @@ def add_question(req: AddQuestionReq):
         raise HTTPException(500, f"Failed to insert: {e}")
     finally:
         conn.close()
+
+# -------------------------------------------------------------
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("sage_api:app", host="0.0.0.0", port=8000, reload=True)
