@@ -312,4 +312,31 @@ def insert_bulk(req: BulkInsertReq):
 # -------------------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("sage_api:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("sage_api:app", host="0.0.0.0", port=8000, reload=True)   class AddQuestionReq(BaseModel):
+    subject: str
+    topic: str
+    difficulty: str   # easy, medium, hard
+    text: str
+    options: dict     # {"A": "...", "B": "...", "C": "...", "D": "..."}
+    correct: str      # "A", "B", "C", "D"
+    explanation: str
+    source: str = "manual"
+
+@app.post("/sage/add_question")
+def add_question(req: AddQuestionReq):
+    """Add one new question to the database."""
+    conn = get_conn()
+    cur = conn.cursor()
+    qid = str(uuid.uuid4())
+    try:
+        cur.execute("""
+            INSERT INTO questions (id, subject, topic, difficulty, text, options, correct, explanation, source)
+            VALUES (?,?,?,?,?,?,?,?,?)
+        """, (qid, req.subject, req.topic, req.difficulty, req.text,
+              json.dumps(req.options), req.correct, req.explanation, req.source))
+        conn.commit()
+        return {"status": "success", "question_id": qid}
+    except Exception as e:
+        raise HTTPException(500, f"Failed to insert: {e}")
+    finally:
+        conn.close()
